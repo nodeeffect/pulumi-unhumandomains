@@ -19,7 +19,7 @@ namespace Pulumi.Unhumandomains
         /// <param name="name">The unique name of the resource</param>
         /// <param name="args">The arguments used to populate this resource's properties</param>
         /// <param name="options">A bag of options that control this resource's behavior</param>
-        public Provider(string name, ProviderArgs? args = null, CustomResourceOptions? options = null)
+        public Provider(string name, ProviderArgs args, CustomResourceOptions? options = null)
             : base("unhumandomains", name, args ?? new ProviderArgs(), MakeResourceOptions(options, ""))
         {
         }
@@ -39,6 +39,9 @@ namespace Pulumi.Unhumandomains
 
     public sealed class ProviderArgs : global::Pulumi.ResourceArgs
     {
+        [Input("apiToken", required: true)]
+        public Input<string> ApiToken { get; set; } = null!;
+
         public ProviderArgs()
         {
         }

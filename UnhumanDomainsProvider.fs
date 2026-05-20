@@ -14,17 +14,14 @@ open Pulumi
 open Pulumi.Experimental
 open Pulumi.Experimental.Provider
 
-type UnhumanDomainsProvider(managementToken: string) =
+type UnhumanDomainsProvider() =
     inherit Pulumi.Experimental.Provider.Provider()
 
     let httpClient = new HttpClient()
 
     static let domainRecordResourceName = "unhumandomains:index:Domain"
     static let apiBaseUrl = "https://unhuman.domains"
-
-    do
-        httpClient.DefaultRequestHeaders.Authorization <- Headers.AuthenticationHeaderValue("Bearer", managementToken)
-
+    
     // Provider has to advertise its version when outputting schema, e.g. for SDK generation.
     // In pulumi-bitlaunch, we have Pulumi generate the terraform bridge, and it automatically pulls version from the tag.
     // Use sdk/dotnet/version.txt as source of version number.
@@ -245,6 +242,12 @@ type UnhumanDomainsProvider(managementToken: string) =
                     },
                     "types": %s,
                     "provider": {
+                        "inputProperties": {
+                            "apiToken": {
+                                "type": "string"
+                            }
+                        },
+                        "requiredInputs": [ "apiToken" ]
                     }
                 }"""
                 UnhumanDomainsProvider.Version
@@ -261,11 +264,28 @@ type UnhumanDomainsProvider(managementToken: string) =
     override self.DiffConfig (request: DiffRequest, ct: CancellationToken): Task<DiffResponse> = 
         Task.FromResult <| DiffResponse()
 
-    override self.Configure (request: ConfigureRequest, ct: CancellationToken): Task<ConfigureResponse> = 
-        if String.IsNullOrWhiteSpace managementToken then
-            failwithf
-                "Environment variable %s not found!"
-                UnhumanDomainsProvider.ManagementTokenEnvVarName
+    override self.Configure (request: ConfigureRequest, ct: CancellationToken): Task<ConfigureResponse> =
+        let maybeApiTokenFromProviderArgs =
+            match request.Args.TryGetValue "apiToken" with
+            | true, value ->
+                match value.TryGetString() with
+                | true, token -> Some token
+                | false, _ -> None
+            | false, _ -> None
+        
+        let apiToken =
+            match maybeApiTokenFromProviderArgs with
+            | Some token -> token
+            | None ->
+                let managementToken = Environment.GetEnvironmentVariable UnhumanDomainsProvider.ManagementTokenEnvVarName
+                if String.IsNullOrWhiteSpace managementToken then
+                    failwithf
+                        "Environment variable %s not found! Api token has to be either passed as env. var or as provider argument."
+                        UnhumanDomainsProvider.ManagementTokenEnvVarName
+                else
+                    managementToken
+        
+        httpClient.DefaultRequestHeaders.Authorization <- Headers.AuthenticationHeaderValue("Bearer", apiToken)
         Task.FromResult <| ConfigureResponse()
    
     override self.Check (request: CheckRequest, ct: CancellationToken): Task<CheckResponse> = 
