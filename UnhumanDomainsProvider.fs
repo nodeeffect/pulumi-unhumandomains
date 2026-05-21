@@ -21,6 +21,25 @@ type UnhumanDomainsProvider() =
 
     static let domainRecordResourceName = "unhumandomains:index:Domain"
     static let apiBaseUrl = "https://unhuman.domains"
+
+    let recordEquivalentTo (rec1: IDictionary<string,obj>) (rec2: IDictionary<string,obj>) =
+        rec1.["type"] = rec2["type"] && rec1.["subdomain"] = rec2.["subdomain"]
+
+    let primitivePropertyValueToObject (value: PropertyValue): obj =
+        if value.Type = PropertyValueType.String then
+            let _, strValue = value.TryGetString()
+            box strValue
+        elif value.Type = PropertyValueType.Number then
+            let _, numValue = value.TryGetNumber()
+            box numValue
+        else
+            failwithf "Unexpected property value type: %A" value.Type
+
+    let recordPropertyValueToDictionary (recordPropertyValue: PropertyValue) : IDictionary<string, obj> =
+        let _, object = recordPropertyValue.TryGetMap()
+        object 
+        |> Seq.map (fun item -> item.Key, primitivePropertyValueToObject item.Value)
+        |> dict
     
     // Provider has to advertise its version when outputting schema, e.g. for SDK generation.
     // In pulumi-bitlaunch, we have Pulumi generate the terraform bridge, and it automatically pulls version from the tag.
@@ -40,23 +59,6 @@ type UnhumanDomainsProvider() =
     interface IDisposable with
         override self.Dispose (): unit = 
             httpClient.Dispose()
-    
-    static member RecordPropertyValueToDictionary (recordPropertyValue: PropertyValue) : IDictionary<string, obj> =
-        let _, object = recordPropertyValue.TryGetMap()
-        object 
-        |> Seq.map 
-            (fun item -> 
-                let value =
-                    if item.Value.Type = PropertyValueType.String then
-                        let _, strValue = item.Value.TryGetString()
-                        box strValue
-                    elif item.Value.Type = PropertyValueType.Number then
-                        let _, numValue = item.Value.TryGetNumber()
-                        box numValue
-                    else
-                        failwithf "Unexpected property value type: %A" item.Value.Type
-                item.Key, value)
-        |> dict
     
     member private self.AsyncGetDnsRecords(domainName: string): Async<Option<seq<IDictionary<string, PropertyValue>>>> =
         async {
@@ -119,12 +121,38 @@ type UnhumanDomainsProvider() =
 {responseBody}"
         }
 
-    member private self.AsyncSetDnsRecords (domainName: string) (records: seq<IDictionary<string,obj>>): Async<unit> =
+    member private self.AsyncSetDnsRecords
+        (domainName: string)
+        (recordsToSet: seq<IDictionary<string,obj>>)
+        (recordsToDelete: seq<IDictionary<string,obj>>)
+        : Async<unit> =
         async {
             // first make sure that default nameservers are used
             do! self.AsyncSetDefaultNameservers domainName
 
-            let payload = {| records = records |}
+            // get existing records first to not lose them when updating
+            let! maybeExistingRecords = self.AsyncGetDnsRecords domainName
+            let updatedRecords =
+                match maybeExistingRecords with
+                | Some existingRecords ->
+                    // add new records; replace existing with new ones if type and subdomain are the same
+                    seq {
+                        for existingRecord in existingRecords do
+                            let transformedRecord = 
+                                existingRecord 
+                                |> Seq.map (fun item -> item.Key, primitivePropertyValueToObject item.Value)
+                                |> dict
+
+                            if recordsToDelete |> Seq.exists (recordEquivalentTo transformedRecord) then
+                                ()
+                            else
+                                match recordsToSet |> Seq.tryFind (recordEquivalentTo transformedRecord) with
+                                | Some newRecord -> yield newRecord
+                                | None -> yield transformedRecord
+                    }
+                | None -> recordsToSet
+
+            let payload = {| records = updatedRecords |}
             let! putDnsRecordsResponse = 
                 httpClient.PutAsync($"{apiBaseUrl}/api/domains/{domainName}/dns", Json.JsonContent.Create payload)
                 |> Async.AwaitTask
@@ -146,7 +174,9 @@ type UnhumanDomainsProvider() =
 {responseBody}"
         }
 
-    member private self.AsyncCreateOrUpdate (properties: ImmutableDictionary<string, PropertyValue>) =
+    member private self.AsyncCreateOrUpdate
+        (properties: ImmutableDictionary<string, PropertyValue>)
+        (oldProperties: ImmutableDictionary<string, PropertyValue>) =
         async {
             let _, domainName = properties.["domainName"].TryGetString()
             let hasDnsRecords, dnsRecordsPropertyValue = properties.TryGetValue "records"
@@ -156,10 +186,22 @@ type UnhumanDomainsProvider() =
             | true, false ->
                 let _, recordsArray = 
                     dnsRecordsPropertyValue.TryGetArray()
-                let records =
+                let recordsToSet =
                     recordsArray
-                    |> Seq.map UnhumanDomainsProvider.RecordPropertyValueToDictionary
-                do! self.AsyncSetDnsRecords domainName records
+                    |> Seq.map recordPropertyValueToDictionary
+                    |> Seq.cache
+                let recordsToDelete =
+                    let oldRecords =
+                        match oldProperties.TryGetValue "records" with
+                        | true, recordsValue -> 
+                            let _, records = recordsValue.TryGetArray()
+                            records
+                        | false, _ -> ImmutableArray.Empty
+                    oldRecords 
+                    |> Seq.map recordPropertyValueToDictionary
+                    |> Seq.filter (fun record -> not (recordsToSet |> Seq.exists (recordEquivalentTo record)))
+                    |> Seq.cache
+                do! self.AsyncSetDnsRecords domainName recordsToSet recordsToDelete
             | false, true ->
                 let _, nameserversArray = nameserversPropertyValue.TryGetArray()
                 let nameservers = 
@@ -344,7 +386,7 @@ type UnhumanDomainsProvider() =
     member private self.AsyncCreate(request: CreateRequest): Async<CreateResponse> =
         async {
             if request.Type = domainRecordResourceName then
-                do! self.AsyncCreateOrUpdate request.Properties
+                do! self.AsyncCreateOrUpdate request.Properties ImmutableDictionary.Empty
                 return CreateResponse(Id = Guid.NewGuid().ToString(), Properties = request.Properties)
             else
                 return failwith $"Unknown resource type '{request.Type}'"
@@ -356,7 +398,7 @@ type UnhumanDomainsProvider() =
     member private self.AsyncUpdate(request: UpdateRequest): Async<UpdateResponse> =
         async {
             if request.Type = domainRecordResourceName then
-                do! self.AsyncCreateOrUpdate request.News
+                do! self.AsyncCreateOrUpdate request.News request.Olds
                 return UpdateResponse(Properties = request.News)
             else
                 return failwith $"Unknown resource type '{request.Type}'"
