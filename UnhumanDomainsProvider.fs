@@ -62,10 +62,12 @@ type UnhumanDomainsProvider() =
     
     member private self.AsyncGetDnsRecords(domainName: string): Async<Option<seq<IDictionary<string, PropertyValue>>>> =
         async {
+            Console.WriteLine $"[UnhumanDomains] GET /api/domains/{domainName}/dns"
             let! dnsRecordsResponse = 
                 httpClient.GetAsync($"{apiBaseUrl}/api/domains/{domainName}/dns")
                 |> Async.AwaitTask
             let! responseBody = dnsRecordsResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
+            Console.WriteLine $"[UnhumanDomains] GET /api/domains/{domainName}/dns <- {(int)dnsRecordsResponse.StatusCode} {responseBody}"
             if dnsRecordsResponse.StatusCode = HttpStatusCode.Conflict then
                 // custom nameservers
                 return None
@@ -109,14 +111,16 @@ type UnhumanDomainsProvider() =
 
     member private self.AsyncSetDefaultNameservers (domainName: string): Async<unit> =
         async {
+            Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/nameservers (default)"
             let! useDefaultNameserversResponse = 
                 httpClient.PutAsync(
                     $"{apiBaseUrl}/api/domains/{domainName}/nameservers",
                     Json.JsonContent.Create {| useDefault = true |}
                 )
                 |> Async.AwaitTask
+            let! responseBody = useDefaultNameserversResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
+            Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/nameservers <- {(int)useDefaultNameserversResponse.StatusCode} {responseBody}"
             if not useDefaultNameserversResponse.IsSuccessStatusCode then
-                let! responseBody = useDefaultNameserversResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
                 return failwith $"Error swithching to default nameservers (status code {useDefaultNameserversResponse.StatusCode}):
 {responseBody}"
         }
@@ -135,27 +139,37 @@ type UnhumanDomainsProvider() =
             let updatedRecords =
                 match maybeExistingRecords with
                 | Some existingRecords ->
-                    // add new records; replace existing with new ones if type and subdomain are the same
-                    seq {
-                        for existingRecord in existingRecords do
-                            let transformedRecord = 
-                                existingRecord 
-                                |> Seq.map (fun item -> item.Key, primitivePropertyValueToObject item.Value)
-                                |> dict
-
-                            if recordsToDelete |> Seq.exists (recordEquivalentTo transformedRecord) then
-                                ()
-                            else
-                                match recordsToSet |> Seq.tryFind (recordEquivalentTo transformedRecord) with
-                                | Some newRecord -> yield newRecord
-                                | None -> yield transformedRecord
-                    }
+                    let transformedExisting =
+                        existingRecords
+                        |> Seq.map (fun record ->
+                            record
+                            |> Seq.map (fun item -> item.Key, primitivePropertyValueToObject item.Value)
+                            |> dict)
+                    let keptExisting =
+                        seq {
+                            for existingRecord in transformedExisting do
+                                if recordsToDelete |> Seq.exists (recordEquivalentTo existingRecord) then
+                                    ()
+                                else
+                                    match recordsToSet |> Seq.tryFind (recordEquivalentTo existingRecord) with
+                                    | Some newRecord -> yield newRecord
+                                    | None -> yield existingRecord
+                        }
+                    let newRecords =
+                        recordsToSet
+                        |> Seq.filter (fun newRecord ->
+                            not (transformedExisting |> Seq.exists (recordEquivalentTo newRecord)))
+                    Seq.append keptExisting newRecords
                 | None -> recordsToSet
 
             let payload = {| records = updatedRecords |}
+            let payloadJson = JsonSerializer.Serialize payload
+            Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/dns -> {payloadJson}"
             let! putDnsRecordsResponse = 
                 httpClient.PutAsync($"{apiBaseUrl}/api/domains/{domainName}/dns", Json.JsonContent.Create payload)
                 |> Async.AwaitTask
+            let! responseBody = putDnsRecordsResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
+            Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/dns <- {(int)putDnsRecordsResponse.StatusCode} {responseBody}"
             if not putDnsRecordsResponse.IsSuccessStatusCode then
                 let! responseBody = putDnsRecordsResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
                 return failwith $"Error setting DNS records (status code {putDnsRecordsResponse.StatusCode}):
@@ -165,9 +179,13 @@ type UnhumanDomainsProvider() =
     member private self.AsyncSetNameservers (domainName: string) (nameservers: seq<string>): Async<unit> =
         async {
             let payload = {| nameservers = nameservers |}
+            let payloadJson = JsonSerializer.Serialize payload
+            Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/nameservers -> {payloadJson}"
             let! putNameserversResponse = 
                 httpClient.PutAsync($"{apiBaseUrl}/api/domains/{domainName}/nameservers", Json.JsonContent.Create payload)
                 |> Async.AwaitTask
+            let! responseBody = putNameserversResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
+            Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/nameservers <- {(int)putNameserversResponse.StatusCode} {responseBody}"
             if not putNameserversResponse.IsSuccessStatusCode then
                 let! responseBody = putNameserversResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
                 return failwith $"Error setting nameservers (status code {putNameserversResponse.StatusCode}):
