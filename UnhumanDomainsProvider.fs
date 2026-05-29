@@ -17,7 +17,7 @@ open Pulumi.Experimental.Provider
 type UnhumanDomainsProvider() =
     inherit Pulumi.Experimental.Provider.Provider()
 
-    let httpClient = new HttpClient()
+    let mutable internalHttpClient:Option<HttpClient> = None
 
     static let domainRecordResourceName = "unhumandomains:index:Domain"
     static let apiBaseUrl = "https://unhuman.domains"
@@ -40,7 +40,14 @@ type UnhumanDomainsProvider() =
         object 
         |> Seq.map (fun item -> item.Key, primitivePropertyValueToObject item.Value)
         |> dict
-    
+
+    member this.HttpClient =
+        match internalHttpClient with
+        | None ->
+            failwith "Provider arg not passed! Required to receive token via provider arg since version 0.0.7"
+        | Some httpClient ->
+            httpClient
+
     // Provider has to advertise its version when outputting schema, e.g. for SDK generation.
     // In pulumi-bitlaunch, we have Pulumi generate the terraform bridge, and it automatically pulls version from the tag.
     // Use sdk/dotnet/version.txt as source of version number.
@@ -54,17 +61,19 @@ type UnhumanDomainsProvider() =
         use reader = new System.IO.StreamReader(stream)
         reader.ReadToEnd().Trim()
 
-    static member val ManagementTokenEnvVarName = "UNHUMANDOMAINS_API_TOKEN"
-
     interface IDisposable with
-        override self.Dispose (): unit = 
-            httpClient.Dispose()
+        override this.Dispose (): unit =
+            match internalHttpClient with
+            | Some httpClient ->
+                httpClient.Dispose()
+            | None ->
+                ()
     
-    member private self.AsyncGetDnsRecords(domainName: string): Async<Option<seq<IDictionary<string, PropertyValue>>>> =
+    member private this.AsyncGetDnsRecords(domainName: string): Async<Option<seq<IDictionary<string, PropertyValue>>>> =
         async {
             Console.WriteLine $"[UnhumanDomains] GET /api/domains/{domainName}/dns"
             let! dnsRecordsResponse = 
-                httpClient.GetAsync($"{apiBaseUrl}/api/domains/{domainName}/dns")
+                this.HttpClient.GetAsync($"{apiBaseUrl}/api/domains/{domainName}/dns")
                 |> Async.AwaitTask
             let! responseBody = dnsRecordsResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
             Console.WriteLine $"[UnhumanDomains] GET /api/domains/{domainName}/dns <- {(int)dnsRecordsResponse.StatusCode} {responseBody}"
@@ -97,10 +106,10 @@ type UnhumanDomainsProvider() =
                 return Some records
         }
 
-    member private self.AsyncGetNameservers(domainName: string): Async<seq<string>> =
+    member private this.AsyncGetNameservers(domainName: string): Async<seq<string>> =
         async {
             let! domainInfo = 
-                httpClient.GetStringAsync($"{apiBaseUrl}/api/domains/{domainName}/info")
+                this.HttpClient.GetStringAsync($"{apiBaseUrl}/api/domains/{domainName}/info")
                 |> Async.AwaitTask
             let data = JsonDocument.Parse(domainInfo).RootElement.GetProperty "data"
             let nameservers = 
@@ -109,11 +118,11 @@ type UnhumanDomainsProvider() =
             return nameservers
         }
 
-    member private self.AsyncSetDefaultNameservers (domainName: string): Async<unit> =
+    member private this.AsyncSetDefaultNameservers (domainName: string): Async<unit> =
         async {
             Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/nameservers (default)"
             let! useDefaultNameserversResponse = 
-                httpClient.PutAsync(
+                this.HttpClient.PutAsync(
                     $"{apiBaseUrl}/api/domains/{domainName}/nameservers",
                     Json.JsonContent.Create {| useDefault = true |}
                 )
@@ -125,17 +134,17 @@ type UnhumanDomainsProvider() =
 {responseBody}"
         }
 
-    member private self.AsyncSetDnsRecords
+    member private this.AsyncSetDnsRecords
         (domainName: string)
         (recordsToSet: seq<IDictionary<string,obj>>)
         (recordsToDelete: seq<IDictionary<string,obj>>)
         : Async<unit> =
         async {
             // first make sure that default nameservers are used
-            do! self.AsyncSetDefaultNameservers domainName
+            do! this.AsyncSetDefaultNameservers domainName
 
             // get existing records first to not lose them when updating
-            let! maybeExistingRecords = self.AsyncGetDnsRecords domainName
+            let! maybeExistingRecords = this.AsyncGetDnsRecords domainName
             let updatedRecords =
                 match maybeExistingRecords with
                 | Some existingRecords ->
@@ -166,7 +175,7 @@ type UnhumanDomainsProvider() =
             let payloadJson = JsonSerializer.Serialize payload
             Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/dns -> {payloadJson}"
             let! putDnsRecordsResponse = 
-                httpClient.PutAsync($"{apiBaseUrl}/api/domains/{domainName}/dns", Json.JsonContent.Create payload)
+                this.HttpClient.PutAsync($"{apiBaseUrl}/api/domains/{domainName}/dns", Json.JsonContent.Create payload)
                 |> Async.AwaitTask
             let! responseBody = putDnsRecordsResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
             Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/dns <- {(int)putDnsRecordsResponse.StatusCode} {responseBody}"
@@ -176,13 +185,13 @@ type UnhumanDomainsProvider() =
 {responseBody}"
         }
 
-    member private self.AsyncSetNameservers (domainName: string) (nameservers: seq<string>): Async<unit> =
+    member private this.AsyncSetNameservers (domainName: string) (nameservers: seq<string>): Async<unit> =
         async {
             let payload = {| nameservers = nameservers |}
             let payloadJson = JsonSerializer.Serialize payload
             Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/nameservers -> {payloadJson}"
             let! putNameserversResponse = 
-                httpClient.PutAsync($"{apiBaseUrl}/api/domains/{domainName}/nameservers", Json.JsonContent.Create payload)
+                this.HttpClient.PutAsync($"{apiBaseUrl}/api/domains/{domainName}/nameservers", Json.JsonContent.Create payload)
                 |> Async.AwaitTask
             let! responseBody = putNameserversResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
             Console.WriteLine $"[UnhumanDomains] PUT /api/domains/{domainName}/nameservers <- {(int)putNameserversResponse.StatusCode} {responseBody}"
@@ -332,20 +341,19 @@ type UnhumanDomainsProvider() =
                 | true, token -> Some token
                 | false, _ -> None
             | false, _ -> None
-        
-        let apiToken =
-            match maybeApiTokenFromProviderArgs with
-            | Some token -> token
+
+        match maybeApiTokenFromProviderArgs with
+        | Some apiToken ->
+            match internalHttpClient with
+            | Some _ ->
+                failwith "Pulumi deployment should not call this.Configure() more than once?"
             | None ->
-                let managementToken = Environment.GetEnvironmentVariable UnhumanDomainsProvider.ManagementTokenEnvVarName
-                if String.IsNullOrWhiteSpace managementToken then
-                    failwithf
-                        "Environment variable %s not found! Api token has to be either passed as env. var or as provider argument."
-                        UnhumanDomainsProvider.ManagementTokenEnvVarName
-                else
-                    managementToken
-        
-        httpClient.DefaultRequestHeaders.Authorization <- Headers.AuthenticationHeaderValue("Bearer", apiToken)
+                let newHttpClient = new HttpClient()
+                newHttpClient.DefaultRequestHeaders.Authorization <- Headers.AuthenticationHeaderValue("Bearer", apiToken)
+                internalHttpClient <- Some newHttpClient
+        | None ->
+            ()
+
         Task.FromResult <| ConfigureResponse()
    
     override self.Check (request: CheckRequest, ct: CancellationToken): Task<CheckResponse> = 
