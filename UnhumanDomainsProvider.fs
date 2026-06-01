@@ -436,10 +436,16 @@ type UnhumanDomainsProvider() =
     member private self.AsyncDelete(request: DeleteRequest): Async<unit> =
         async {
             if request.Type = domainRecordResourceName then
-                let _, domainName = request.Properties.["domainName"].TryGetString()
-                do! self.AsyncSetDefaultNameservers domainName
-                // Don't reset DNS records to empty because unhumandomains will give an error
-                // even though 'records' field is present and contains empty array ([]).
+                match internalHttpClient with
+                | None ->
+                    // Provider has no token configured (legacy provider without apiToken arg).
+                    // Skip the HTTP call since we can't authenticate.
+                    ()
+                | Some _ ->
+                    let _, domainName = request.Properties.["domainName"].TryGetString()
+                    do! self.AsyncSetDefaultNameservers domainName
+                    // Don't reset DNS records to empty because unhumandomains will give an error
+                    // even though 'records' field is present and contains empty array ([]).
             else
                 failwith $"Unknown resource type '{request.Type}'"
         }
