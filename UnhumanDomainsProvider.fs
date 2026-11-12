@@ -252,7 +252,6 @@ type UnhumanDomainsProvider(host: Pulumi.Experimental.IEngine) =
     member private this.AsyncSetNameservers (domainName: string) (nameservers: seq<string>): Async<unit> =
         async {
             let payload = {| nameservers = nameservers |}
-            let payloadJson = JsonSerializer.Serialize payload
             let! putNameserversResponse = 
                 this.HttpClient.AsyncPut($"{apiBaseUrl}/api/domains/{domainName}/nameservers", Json.JsonContent.Create payload)
             let! responseBody = putNameserversResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
@@ -265,6 +264,15 @@ type UnhumanDomainsProvider(host: Pulumi.Experimental.IEngine) =
                 let! responseBody = putNameserversResponse.Content.ReadAsStringAsync() |> Async.AwaitTask
                 return failwith $"Error setting nameservers (status code {putNameserversResponse.StatusCode}):
 {responseBody}"
+            // double-check that nameservers were set
+            let! domainsInfo = this.HttpClient.AsyncGetString($"{apiBaseUrl}/api/domains/{domainName}/info")
+            let data = JsonDocument.Parse(domainsInfo).RootElement.GetProperty "data"
+            let returnedNameservers =
+                data.GetProperty("nameservers").EnumerateArray()
+                |> Seq.map (fun elem -> elem.GetString())
+                |> Set.ofSeq
+            if not (returnedNameservers = Set.ofSeq nameservers) then
+                return failwith $"After setting nameservers current nameservers ({returnedNameservers}) are not equal to the ones requested to be set ({nameservers})"
         }
 
     member private self.AsyncCreateOrUpdate
